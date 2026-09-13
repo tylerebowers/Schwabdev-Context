@@ -498,6 +498,40 @@ d2 = Data(cache_db=d.db_path)      # d was closed above; Data is single-use afte
 ev_t = d2.get_events("AMD", 3650, level1=True, level2=True)
 check("stored l1/l2 come back tagged", [e["type"] for e in ev_t] == ["l1", "l2"], f"{ev_t}")
 
+print("\n== deploy handler wakes the strategy on market data and activity-only messages ==")
+class HandlerStreamer:
+    """Fake schwabdev.Stream: captures the deploy handler so the test can drive it."""
+    def __init__(self): self.handler = None; self.sent = []
+    def start(self, handler, daemon=False): self.handler = handler
+    def send(self, m): self.sent.append(m)
+    def account_activity(self, *a, **k): return ("acct_activity", a)
+    def chart_equity(self, k, f): return ("chart", k)
+    def level_one_equities(self, k, f): return ("l1", k)
+    def nasdaq_book(self, k, f): return ("nasdaq", k)
+    def nyse_book(self, k, f): return ("nyse", k)
+    def stop(self): pass
+
+import schwabdev
+_real_stream = schwabdev.Stream
+schwabdev.Stream = lambda client: HandlerStreamer()
+try:
+    woke = []
+    ctx_d = Context(None, cache_db=os.path.join(tempfile.mkdtemp(), "wake.db"))
+    ctx_d.deploy(lambda tc, ev: woke.append(ev), ["AMD"], plot=False, chart=True, level1=True, record=False)
+    h = ctx_d._streamer.handler
+    # Test that an activity-only event (fill/cancel) wakes the strategy
+    h(json.dumps({"data": [{"service": "ACCT_ACTIVITY", "timestamp": 1,
+                            "content": [{"1": "acct", "2": "OrderFillCompleted", "3": "{}"}]}]}))
+    check("activity-only message wakes the strategy", len(woke) == 1 and woke[0] == [], f"{woke}")
+    # Test that a market-data message wakes the strategy with the batch
+    woke.clear()
+    h(json.dumps({"data": [{"service": "CHART_EQUITY", "timestamp": 1, "content": [
+        {"key": "AMD", "2": 100.0, "3": 101.0, "4": 99.0, "5": 100.5, "6": 1000, "7": 1_700_000_000_000}]}]}))
+    check("market-data message wakes the strategy with a batch",
+          len(woke) == 1 and woke[0] and woke[0][0]["type"] == "c", f"{woke}")
+finally:
+    schwabdev.Stream = _real_stream
+
 print("\n" + "="*54)
 print("FAILURES:", FAILS if FAILS else "none")
 sys.exit(1 if FAILS else 0)

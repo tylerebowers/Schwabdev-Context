@@ -109,6 +109,9 @@ class Context:
                 if batch:
                     notify = bool((chart and events["chart"]) or (level1 and events["l1"]) or (level2 and events["l2"]))
                     session.step(strategy, batch, notify=notify)
+                elif events["activity"]:
+                    # Notify the strategy on fills/cancels
+                    session.step(strategy, [], notify=True)
             except Exception:
                 print("[live] handler error (session continues):")
                 traceback.print_exc()
