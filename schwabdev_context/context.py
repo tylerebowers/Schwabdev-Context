@@ -58,6 +58,12 @@ class Context:
             run.report()
         return run
 
+    def load_candles(self, ticker, candles):
+        """Preload `candles` into the backtest cache (see `Data.load_candles`); returns the
+        number of rows written. Lets hosts fill TC with their own data instead of fetching
+        from schwab."""
+        return self.data.load_candles(ticker, candles)
+
     def record(self, tickers, chart=True, level1=True, level2=True, verbose=True, **start_auto_kwargs):
         """Record live market data into the DB (see `Data.record`); returns the streamer."""
         return self.data.record(tickers, chart=chart, level1=level1, level2=level2, verbose=verbose, **start_auto_kwargs)

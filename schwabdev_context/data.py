@@ -12,11 +12,16 @@ _L2_DDL = "time INTEGER, bids TEXT, asks TEXT"
 
 class Data:
     def __init__(self, cache_db="~/.schwabdev/candles.db", client=None):
+        """`cache_db` is the SQLite file storing the candle cache. Set it to None, "", or ":memory:"
+        to use a transient in-memory SQLite database."""
+        if cache_db in (None, ""):
+            cache_db = ":memory:"
         self.db_path = os.path.expanduser(cache_db)
-        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+        if self.db_path != ":memory:":
+            os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._client = client
         self._con = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._tables = set() 
+        self._tables = set()
 
     @staticmethod
     def table(prefix, ticker):
@@ -78,6 +83,44 @@ class Data:
                             "WHERE time >= ? ORDER BY time", (ms(need_start),)).fetchall()
         return [{"symbol": ticker, "time": t, "open": o, "high": h, "low": l, "close": c,
                  "volume": v, "type": "c"} for t, o, h, l, c, v in rows]
+
+    def load_candles(self, ticker, candles):
+        """Upsert `candles` into the per-ticker chart cache and return the number of rows written.
+        Accepts the same dict shape `get_candles` returns so hosts can preload their own data before
+        a backtest instead of retrieving them from schwab:
+        {"symbol", "time" (ms), "open", "high", "low", "close", "volume", "type": "c"}
+        `symbol` and `type` are optional. `time` may be a UNIX-ms int or a datetime. Rows are
+        INSERT OR IGNORE, so safe to rerun without duplication."""
+        if isinstance(candles, dict):
+            candles = [candles]
+        if not candles:
+            return 0
+        if self._con is None:
+            self._con = sqlite3.connect(self.db_path, check_same_thread=False)
+        table = self.table("chart", ticker)
+        self._con.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({_CHART_DDL})')
+        rows = []
+        for c in candles:
+            t = c.get("time")
+            if isinstance(t, datetime.datetime):
+                t = int(t.timestamp() * 1000)
+            elif t is not None:
+                t = int(t)
+            if t is None:
+                continue
+            rows.append((t,
+                         float(c.get("open", 0.0)),
+                         float(c.get("high", 0.0)),
+                         float(c.get("low", 0.0)),
+                         float(c.get("close", 0.0)),
+                         float(c.get("volume", 0.0) or 0.0)))
+        if not rows:
+            return 0
+        self._con.executemany(
+            f'INSERT OR IGNORE INTO "{table}" (time, open, high, low, close, volume) VALUES (?,?,?,?,?,?)',
+            rows)
+        self._con.commit()
+        return len(rows)
 
 
     def _fetch_candles(self, ticker, start, end, extended_hours=False):
