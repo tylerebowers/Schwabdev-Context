@@ -34,11 +34,14 @@ class Data:
 
     # reading (backtest) ------------------------------------------------------
 
-    def get_candles(self, ticker, history_days, extended_hours=False):
-        """Chronological minute candles for `ticker` over the last `history_days`. Missing ranges
-        are fetched via the client (when one is set) and cached; everything is read back from
-        SQLite. `extended_hours` requests pre/after-market candles from Schwab for any range
-        that has to be fetched."""
+    def get_candles(self, ticker, history_days=90, start=None, end=None, extended_hours=False):
+        """Chronological minute candles for `ticker` over the requested dates, as
+        [{"symbol", "time" (ms), "open", "high", "low", "close", "volume", "type": "c"}].
+        The date range is `start`..`end` if both are given. `end` defaults to now. `history_days`
+        may be used to automatically calculate start.
+        Missing ranges are fetched via the client (when one is set) and cached; everything is
+        read back from SQLite. `extended_hours` requests pre/after-market candles from Schwab
+        for any range that has to be fetched."""
         ms = lambda d: int(d.timestamp() * 1000)
         to_dt = lambda m: datetime.datetime.fromtimestamp(m / 1000, datetime.timezone.utc)
 
@@ -46,23 +49,31 @@ class Data:
         self._con.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({_CHART_DDL})')
 
         now = datetime.datetime.now(datetime.timezone.utc)
-        need_start = now - datetime.timedelta(days=history_days)
+        if start is not None:
+            end = end or now  # start wins; end defaults to now (history_days ignored)
+        elif end is not None:
+            start = end - datetime.timedelta(days=history_days)  # end given: history_days defines start
+        else:
+            end = now  # neither: history_days to now
+            start = end - datetime.timedelta(days=history_days)
+        need_start, need_end = start, end
         earliest, latest = self._con.execute(f'SELECT MIN(time), MAX(time) FROM "{table}"').fetchone()
 
         # determine which ranges are missing from the cache
         ranges = []
         if latest is None:
-            ranges.append((need_start, now)) # empty cache: full range
+            ranges.append((need_start, need_end)) # empty cache: full range
         else:
-            ranges.append((to_dt(latest), now)) # recent gap (latest -> now)
-            if earliest > ms(need_start):
-                ranges.append((need_start, to_dt(earliest))) # backfill older history
+            if to_dt(latest) < need_end: # recent gap (latest -> end)
+                ranges.append((max(to_dt(latest), need_start), need_end))
+            if earliest > ms(need_start): # backfill older history
+                ranges.append((need_start, min(to_dt(earliest), need_end)))
 
         # fetch each missing range in <=10-day chunks and cache it (INSERT OR IGNORE dedupes) with no client we run cache-only and skip all API calls.
-        for start, end in (ranges if self._client else []):
-            cur = end
-            while cur > start:
-                chunk_start = max(start, cur - datetime.timedelta(days=10))
+        for start_r, end_r in (ranges if self._client else []):
+            cur = end_r
+            while cur > start_r:
+                chunk_start = max(start_r, cur - datetime.timedelta(days=10))
                 data = self._fetch_candles(ticker, chunk_start, cur, extended_hours)
                 if not data:
                     break
@@ -75,7 +86,8 @@ class Data:
                 _time.sleep(0.5)  # rate-limit: 2 requests/sec
 
         rows = self._con.execute(f'SELECT time, open, high, low, close, volume FROM "{table}" '
-                            "WHERE time >= ? ORDER BY time", (ms(need_start),)).fetchall()
+                            "WHERE time >= ? AND time <= ? ORDER BY time",
+                            (ms(need_start), ms(need_end))).fetchall()
         return [{"symbol": ticker, "time": t, "open": o, "high": h, "low": l, "close": c,
                  "volume": v, "type": "c"} for t, o, h, l, c, v in rows]
 
@@ -99,13 +111,24 @@ class Data:
         except ValueError:
             return []
 
-    def get_events(self, ticker, history_days, level1=False, level2=False):
+    def get_events(self, ticker, history_days=90, start=None, end=None, level1=False, level2=False):
         """Chronological RECORDED level-1 quotes / level-2 book snapshots for `ticker` over the
-        last `history_days`, in the same event shapes `parse()` produces. Read-only: Schwab offers
+        requested dates, in the same event shapes `parse()` produces. Read-only: Schwab offers
         no l1/l2 history, so these can only come from a prior `record()` or live `deploy()`.
-        Missing tables simply yield no events."""
-        since = int((datetime.datetime.now(datetime.timezone.utc)
-                     - datetime.timedelta(days=history_days)).timestamp() * 1000)
+        The date range is `start`..`end` if both are given. `end` defaults to now. `history_days`
+        may be used to automatically calculate start.
+        Missing tables simply yield no events.
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if start is not None:
+            end = end or now  # start wins; end defaults to now (history_days ignored)
+        elif end is not None:
+            start = end - datetime.timedelta(days=history_days)  # end given: history_days defines start
+        else:
+            end = now  # neither: history_days to now
+            start = end - datetime.timedelta(days=history_days)
+        since = int(start.timestamp() * 1000)
+        until = int(end.timestamp() * 1000)
         events = []
         exists = lambda t: self._con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone()
@@ -113,12 +136,13 @@ class Data:
         if level1 and exists(t := self.table("l1", ticker)):
             for time, bid, ask, last, bsz, asz in self._con.execute(
                     f'SELECT time, bid, ask, last, bid_size, ask_size FROM "{t}" '
-                    "WHERE time >= ? ORDER BY time", (since,)):
+                    "WHERE time >= ? AND time <= ? ORDER BY time", (since, until)):
                 events.append({"symbol": ticker, "time": time, "bid": bid, "ask": ask,
                                 "last": last, "bid_size": bsz, "ask_size": asz, "type": "l1"})
         if level2 and exists(t := self.table("l2", ticker)):
             for time, bids, asks in self._con.execute(
-                    f'SELECT time, bids, asks FROM "{t}" WHERE time >= ? ORDER BY time', (since,)):
+                    f'SELECT time, bids, asks FROM "{t}" WHERE time >= ? AND time <= ? ORDER BY time',
+                    (since, until)):
                 events.append({"symbol": ticker, "time": time, "type": "l2",
                                 "bids": json.loads(bids or "[]"), "asks": json.loads(asks or "[]")})
         events.sort(key=lambda e: e["time"])
