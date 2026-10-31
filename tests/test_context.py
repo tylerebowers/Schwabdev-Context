@@ -386,6 +386,32 @@ check("recorded l1/l2 read back", len(ev) == 2 and ev[0]["bid"] == 1 and ev[1]["
 check("cache-only get_candles works with no client", len(d.get_candles("AMD", 3650)) == 1)
 d.close()
 
+print("\n== load_candles preload API ==========================")
+mem = Data(cache_db=None, client=None)   # None / "" / ":memory:" all mean in-memory
+n = mem.load_candles("NVDA", [
+    {"symbol": "NVDA", "time": 1_700_000_000_000, "open": 100, "high": 101, "low": 99,
+     "close": 100.5, "volume": 1000, "type": "c"},
+    {"symbol": "NVDA", "time": 1_700_000_060_000, "open": 100.5, "high": 102, "low": 100,
+     "close": 101, "volume": 1200, "type": "c"},
+])
+check("load_candles returns rows written", n == 2, f"n={n}")
+check("preloaded bars read back via get_candles",
+      len(mem.get_candles("NVDA", 3650)) == 2)
+check("re-preload is idempotent (INSERT OR IGNORE)",
+      mem.load_candles("NVDA", [{"time": 1_700_000_000_000, "open": 1, "high": 1, "low": 1,
+                                 "close": 1, "volume": 1}]) == 1
+      and len(mem.get_candles("NVDA", 3650)) == 2)
+check("datetime time is accepted",
+      mem.load_candles("NVDA", [{"time": datetime.datetime(2024, 1, 2, 14, 30,
+                                                           tzinfo=datetime.timezone.utc),
+                                 "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]) == 1)
+check("Context.load_candles delegates to Data",
+      Context(None, cache_db=None).load_candles("AMD", []) == 0)
+check("':memory:' and '' are accepted aliases for in-memory",
+      Data(cache_db=":memory:", client=None).db_path == ":memory:"
+      and Data(cache_db="", client=None).db_path == ":memory:")
+mem.close()
+
 print("\n== level-2 routing without a client ==================")
 class FakeStreamer:
     def __init__(self): self.sent = []
