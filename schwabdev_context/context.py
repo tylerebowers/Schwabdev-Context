@@ -22,10 +22,13 @@ class Context:
 
     # backtesting -------------------------------------------------------------
 
-    def backtest(self, strategy, tickers, history_days=90, cash=10_000, report=True, plot=False,
+    def backtest(self, strategy, tickers, history_days=90, start=None, end=None, cash=10_000, report=True, plot=False,
                  chart=True, level1=False, level2=False, costs=None, fill_delay=2,
                  extended_hours=False):
         """Replay cached data through `strategy` and return a backtest run.
+
+        The date range is `start`..`end` if both are given. `end` defaults to now. `history_days`
+        may be used to automatically calculate start.
 
         `chart`/`level1`/`level2` pick which event types are sent to the strategy. Candles are
         always replayed and always settle orders — with chart=False they still track order
@@ -44,9 +47,9 @@ class Context:
 
         events = []
         for ticker in tickers:
-            events.extend(self.data.get_candles(ticker, history_days, extended_hours))  # always: fills/marking
+            events.extend(self.data.get_candles(ticker, history_days, start, end, extended_hours))  # always: fills/marking
             if level1 or level2:
-                events.extend(self.data.get_events(ticker, history_days, level1, level2))
+                events.extend(self.data.get_events(ticker, history_days, start, end, level1, level2))
         events.sort(key=lambda e: e["time"])
 
         enabled = {"c": chart, "l1": level1, "l2": level2}
